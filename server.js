@@ -47,7 +47,7 @@ app.post('/api/completions/v1', async (req, res) => {
 
     // Chamar API Groq (grátis)
     const response = await axios.post(GROQ_API_URL, {
-      model: 'mixtral-8x7b-32768',
+      model: 'llama-3.1-70b-versatile',
       messages: messagesWithSystem,
       stream: false,
       temperature: 0.7,
