@@ -8,9 +8,9 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json());
 
-// Configuração da API Manus
-const MANUS_API_URL = 'https://api.manus.im/v1/chat/completions';
-const MANUS_API_KEY = process.env.MANUS_API_KEY || '';
+// Usar API Groq (grátis)
+const GROQ_API_URL = 'https://api.groq.com/openai/v1/chat/completions';
+const GROQ_API_KEY = process.env.GROQ_API_KEY || '';
 
 // Health check
 app.get('/health', (req, res) => {
@@ -45,14 +45,16 @@ app.post('/api/completions/v1', async (req, res) => {
       }))
     ];
 
-    // Chamar API Manus
-    const response = await axios.post(MANUS_API_URL, {
-      model: 'gpt-4o-mini',
+    // Chamar API Groq (grátis)
+    const response = await axios.post(GROQ_API_URL, {
+      model: 'mixtral-8x7b-32768',
       messages: messagesWithSystem,
-      stream: false
+      stream: false,
+      temperature: 0.7,
+      max_tokens: 1024
     }, {
       headers: {
-        'Authorization': `Bearer ${MANUS_API_KEY}`,
+        'Authorization': `Bearer ${GROQ_API_KEY}`,
         'Content-Type': 'application/json'
       }
     });
