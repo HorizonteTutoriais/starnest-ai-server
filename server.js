@@ -9,146 +9,118 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 
-// Configurações de API
-// Usaremos GROQ como principal por ser rápido e gratuito para testes, 
-// mas os formatos de resposta serão adaptados para o que o APK espera.
 const GROQ_API_URL = 'https://api.groq.com/openai/v1/chat/completions';
 const GROQ_API_KEY = process.env.GROQ_API_KEY || '';
 
-// Cache em memória para tarefas de imagem (Polling)
-const imageTasks = new Map();
+// --- DASHBOARD ---
+app.get('/', (req, res) => res.send('<h1>Horizon AI v10.0 - DEFINITIVO</h1><p>Status: Online</p>'));
 
-// --- HELPER: Formatação de Resposta SSE ---
-function sendSSE(res, content) {
+// --- HELPER: CHAMADA DE IA ---
+async function callAI(messages, systemPrompt, temperature = 0.7) {
+  const payload = {
+    model: "llama-3.3-70b-versatile",
+    messages: [{ role: "system", content: systemPrompt }, ...messages],
+    temperature: temperature,
+    max_tokens: 1024
+  };
+
+  try {
+    const res = await axios.post(GROQ_API_URL, payload, {
+      headers: { 'Authorization': `Bearer ${GROQ_API_KEY}` },
+      timeout: 10000
+    });
+    return res.data.choices[0].message.content;
+  } catch (e) {
+    console.error("Erro Groq:", e.message);
+    return null;
+  }
+}
+
+// --- ENDPOINT PRINCIPAL ---
+app.post(['/api/completions/v1', '/api/chat/completions', '/api/completions'], async (req, res) => {
+  const messages = req.body.messages || [];
+  const bodyStr = JSON.stringify(req.body).toLowerCase();
+  const lastMessage = messages.length > 0 ? messages[messages.length - 1].content : "";
+
+  try {
+    // 1. Identificar a função solicitada pelo APK
+    const isGrammarFull = bodyStr.includes('check the grammar') && bodyStr.includes('explanation');
+    const isAutoGrammar = bodyStr.includes('just return the correct result');
+
+    let finalResponse;
+
+    if (isGrammarFull || isAutoGrammar) {
+      // PROMPT CIRÚRGICO PARA GRAMÁTICA
+      const systemPrompt = `Você é um motor de correção gramatical. Analise o texto e retorne APENAS um objeto JSON válido com estas chaves: 
+      "original": o texto enviado pelo usuário,
+      "improved": o texto corrigido (se não houver erro, repita o original),
+      "explanation": uma explicação curta em português do que foi corrigido (se não houver erro, deixe vazio),
+      "isCorrect": um booleano (true se o texto original já estava correto, false se houve correção).
+      NÃO escreva nada fora do JSON.`;
+      
+      const aiResult = await callAI(messages, systemPrompt, 0);
+      
+      try {
+        // Tenta extrair o JSON da resposta da IA
+        const jsonMatch = aiResult.match(/\{[\s\S]*\}/);
+        if (jsonMatch) {
+          finalResponse = JSON.parse(jsonMatch[0]);
+        } else {
+          throw new Error("JSON não encontrado");
+        }
+      } catch (e) {
+        // Fallback caso a IA falhe no JSON
+        finalResponse = {
+          original: lastMessage,
+          improved: aiResult || lastMessage,
+          explanation: "Correção aplicada.",
+          isCorrect: false
+        };
+      }
+    } else {
+      // Chat normal ou outras funções
+      const systemPrompt = "Você é um assistente de IA útil. Responda sempre em Português (Brasil).";
+      const aiResult = await callAI(messages, systemPrompt, 0.7);
+      finalResponse = aiResult || "Desculpe, não consegui processar sua mensagem.";
+    }
+
+    // CONFIGURAÇÃO SSE (STREAM) QUE O APK ESPERA
     res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');
-    
+
+    // O segredo para o APK processar corretamente:
+    // Se for gramática, o conteúdo do delta deve ser o JSON em formato de string.
+    // Se for chat, o conteúdo é o texto puro.
+    const contentToSend = typeof finalResponse === 'object' ? JSON.stringify(finalResponse) : finalResponse;
+
     const sseData = {
-        choices: [{ delta: { content: content } }]
+      choices: [{
+        delta: {
+          content: contentToSend
+        }
+      }]
     };
+
     res.write(`data: ${JSON.stringify(sseData)}\n\n`);
     res.write('data: [DONE]\n\n');
     res.end();
-}
 
-// --- ENDPOINTS DE GRAMÁTICA E TEXTO ---
-
-async function handleAIFunctions(req, res) {
-    try {
-        const bodyStr = JSON.stringify(req.body).toLowerCase();
-        const messages = req.body.messages || [];
-        const lastMessage = messages.length > 0 ? messages[messages.length - 1].content : '';
-        
-        // 1. Identificar o tipo de função pelo conteúdo do prompt (O APK envia prompts específicos)
-        const isGrammarCheck = bodyStr.includes('check the grammar') && bodyStr.includes('explanation');
-        const isAutoGrammar = bodyStr.includes('just return the correct result');
-        const isToneChanger = bodyStr.includes('tone');
-        const isProfessional = bodyStr.includes('professional');
-        const isVision = messages.some(m => Array.isArray(m.content) && m.content.some(c => c.type === 'image_url'));
-
-        let systemPrompt = "Você é um assistente de IA útil. Responda sempre em Português (Brasil).";
-        let forceJson = false;
-
-        if (isGrammarCheck) {
-            systemPrompt = `Você é um corretor gramatical. Analise o texto e retorne OBRIGATORIAMENTE um JSON com:
-            {
-              "original": "texto original",
-              "improved": "texto corrigido",
-              "explanation": "breve explicação do erro"
-            }`;
-            forceJson = true;
-        } else if (isAutoGrammar) {
-            systemPrompt = "Você é um corretor gramatical. Retorne APENAS o texto corrigido, sem nenhuma explicação ou aspas.";
-        } else if (isToneChanger) {
-            systemPrompt = "Você altera o tom de textos. Retorne APENAS o texto modificado no tom solicitado.";
-        } else if (isProfessional) {
-            systemPrompt = "Você é um assistente de e-mail profissional. Melhore o texto para um ambiente corporativo. Retorne apenas o texto final.";
-        }
-
-        // Chamada para o Groq (ou OpenAI)
-        const response = await axios.post(GROQ_API_URL, {
-            model: isVision ? "llama-3.2-11b-vision-preview" : "llama-3.3-70b-versatile",
-            messages: [
-                { role: "system", content: systemPrompt },
-                ...messages.map(m => ({
-                    role: m.role,
-                    content: typeof m.content === 'string' ? m.content : (Array.isArray(m.content) ? m.content.filter(c => c.type === 'text').map(c => c.text).join(' ') : JSON.stringify(m.content))
-                }))
-            ],
-            response_format: forceJson ? { type: "json_object" } : undefined,
-            temperature: 0.2
-        }, {
-            headers: { 'Authorization': `Bearer ${GROQ_API_KEY}` }
-        });
-
-        let aiContent = response.data.choices[0].message.content;
-
-        // O APK espera as respostas via SSE (Stream) no endpoint de completions
-        sendSSE(res, aiContent);
-
-    } catch (error) {
-        console.error("AI Error:", error.message);
-        sendSSE(res, "Desculpe, tive um problema técnico. Tente novamente.");
-    }
-}
-
-app.post(['/api/completions/v1', '/api/chat/completions', '/api/completions'], handleAIFunctions);
-
-// --- ENDPOINTS DE IMAGEM (GERADOR) ---
-
-app.post('/api/image-generator', async (req, res) => {
-    try {
-        const { prompt, style } = req.body;
-        const generationId = crypto.randomUUID();
-        const taskId = crypto.randomUUID();
-
-        // Usamos Pollinations AI (Gratuito e rápido)
-        const seed = Math.floor(Math.random() * 1000000);
-        const imageUrl = `https://image.pollinations.ai/prompt/${encodeURIComponent(prompt + ", " + (style || "")) }?seed=${seed}&width=1024&height=1024&nologo=true`;
-
-        // Salva para o Polling
-        imageTasks.set(generationId, {
-            generationId,
-            taskId,
-            status: 'completed',
-            percentage: '100',
-            imageUrls: [{ url: imageUrl }]
-        });
-
-        // O APK espera o formato: { data: { generationId, taskId, ... } }
-        res.json({
-            data: {
-                generationId,
-                taskId,
-                status: 'completed',
-                percentage: '100',
-                imageUrls: [{ url: imageUrl }]
-            }
-        });
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
+  } catch (error) {
+    console.error("Erro Geral:", error.message);
+    const errorSse = { choices: [{ delta: { content: "Erro no servidor." } }] };
+    res.write(`data: ${JSON.stringify(errorSse)}\n\n`);
+    res.write('data: [DONE]\n\n');
+    res.end();
+  }
 });
 
-app.get('/api/image-generator/:id', (req, res) => {
-    const task = imageTasks.get(req.params.id);
-    if (!task) return res.status(404).json({ error: "Task not found" });
-    res.json({ data: task });
+// --- IMAGENS ---
+app.post('/api/image-generator', (req, res) => {
+  const id = crypto.randomUUID();
+  const prompt = req.body.prompt || "image";
+  const url = `https://image.pollinations.ai/prompt/${encodeURIComponent(prompt)}?width=1024&height=1024&nologo=true`;
+  res.json({ data: { generationId: id, taskId: id, status: 'completed', percentage: '100', imageUrls: [{ url }] } });
 });
 
-// --- ENDPOINT DE UPLOAD (OCR / VISÃO) ---
-app.post('/api/upload', (req, res) => {
-    // O APK chama esse endpoint antes de enviar imagens para a IA
-    res.json({
-        status: "success",
-        data: {
-            url: "https://via.placeholder.com/150", // Placeholder, o app usa o base64 local
-            message: "Upload successful"
-        }
-    });
-});
-
-app.get('/health', (req, res) => res.json({ status: "ok" }));
-
-app.listen(PORT, () => console.log(`Servidor rodando na porta ${PORT}`));
+app.listen(PORT, () => console.log(`Servidor v10.0 DEFINITIVO rodando na porta ${PORT}`));
