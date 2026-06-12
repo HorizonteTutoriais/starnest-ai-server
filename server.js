@@ -13,7 +13,7 @@ const GROQ_API_URL = 'https://api.groq.com/openai/v1/chat/completions';
 const GROQ_API_KEY = process.env.GROQ_API_KEY || '';
 
 // --- DASHBOARD ---
-app.get('/', (req, res) => res.send('<h1>Horizon AI v10.0 - DEFINITIVO</h1><p>Status: Online</p>'));
+app.get('/', (req, res) => res.send('<h1>Horizon AI v11.0 - DEFINITIVO</h1><p>Status: Online</p>'));
 
 // --- HELPER: CHAMADA DE IA ---
 async function callAI(messages, systemPrompt, temperature = 0.7) {
@@ -47,10 +47,8 @@ app.post(['/api/completions/v1', '/api/chat/completions', '/api/completions'], a
     const isGrammarFull = bodyStr.includes('check the grammar') && bodyStr.includes('explanation');
     const isAutoGrammar = bodyStr.includes('just return the correct result');
 
-    let finalResponse;
-
     if (isGrammarFull || isAutoGrammar) {
-      // PROMPT CIRÚRGICO PARA GRAMÁTICA
+      // PROMPT PARA GRAMÁTICA (JSON)
       const systemPrompt = `Você é um motor de correção gramatical. Analise o texto e retorne APENAS um objeto JSON válido com estas chaves: 
       "original": o texto enviado pelo usuário,
       "improved": o texto corrigido (se não houver erro, repita o original),
@@ -59,40 +57,38 @@ app.post(['/api/completions/v1', '/api/chat/completions', '/api/completions'], a
       NÃO escreva nada fora do JSON.`;
       
       const aiResult = await callAI(messages, systemPrompt, 0);
+      let finalJson;
       
       try {
-        // Tenta extrair o JSON da resposta da IA
         const jsonMatch = aiResult.match(/\{[\s\S]*\}/);
-        if (jsonMatch) {
-          finalResponse = JSON.parse(jsonMatch[0]);
-        } else {
-          throw new Error("JSON não encontrado");
-        }
+        finalJson = jsonMatch ? JSON.parse(jsonMatch[0]) : null;
       } catch (e) {
-        // Fallback caso a IA falhe no JSON
-        finalResponse = {
+        finalJson = null;
+      }
+
+      if (!finalJson) {
+        finalJson = {
           original: lastMessage,
           improved: aiResult || lastMessage,
           explanation: "Correção aplicada.",
           isCorrect: false
         };
       }
-    } else {
-      // Chat normal ou outras funções
-      const systemPrompt = "Você é um assistente de IA útil. Responda sempre em Português (Brasil).";
-      const aiResult = await callAI(messages, systemPrompt, 0.7);
-      finalResponse = aiResult || "Desculpe, não consegui processar sua mensagem.";
-    }
 
-    // CONFIGURAÇÃO SSE (STREAM) QUE O APK ESPERA
+      // IMPORTANTE: Para Gramática, o APK NÃO usa SSE, ele espera um JSON direto!
+      // Mas como o endpoint é o mesmo, vamos enviar o JSON direto sem o formato de stream choices/delta
+      return res.json(finalJson);
+    } 
+    
+    // 2. CHAT NORMAL (SSE)
+    // Se não for gramática, usamos o formato SSE que fez o chat funcionar
+    const systemPrompt = "Você é um assistente de IA útil. Responda sempre em Português (Brasil).";
+    const aiResult = await callAI(messages, systemPrompt, 0.7);
+    const contentToSend = aiResult || "Desculpe, não consegui processar sua mensagem.";
+
     res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');
-
-    // O segredo para o APK processar corretamente:
-    // Se for gramática, o conteúdo do delta deve ser o JSON em formato de string.
-    // Se for chat, o conteúdo é o texto puro.
-    const contentToSend = typeof finalResponse === 'object' ? JSON.stringify(finalResponse) : finalResponse;
 
     const sseData = {
       choices: [{
@@ -108,10 +104,7 @@ app.post(['/api/completions/v1', '/api/chat/completions', '/api/completions'], a
 
   } catch (error) {
     console.error("Erro Geral:", error.message);
-    const errorSse = { choices: [{ delta: { content: "Erro no servidor." } }] };
-    res.write(`data: ${JSON.stringify(errorSse)}\n\n`);
-    res.write('data: [DONE]\n\n');
-    res.end();
+    res.status(500).json({ error: "Erro interno" });
   }
 });
 
@@ -123,4 +116,4 @@ app.post('/api/image-generator', (req, res) => {
   res.json({ data: { generationId: id, taskId: id, status: 'completed', percentage: '100', imageUrls: [{ url }] } });
 });
 
-app.listen(PORT, () => console.log(`Servidor v10.0 DEFINITIVO rodando na porta ${PORT}`));
+app.listen(PORT, () => console.log(`Servidor v11.0 DEFINITIVO rodando na porta ${PORT}`));
