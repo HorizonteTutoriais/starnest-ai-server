@@ -12,99 +12,107 @@ app.use(express.json({ limit: '50mb' }));
 const GROQ_API_KEY = process.env.GROQ_API_KEY || '';
 
 // --- DASHBOARD ---
-app.get('/', (req, res) => res.send('<h1>Horizon AI v7.0 - Final</h1><p>Status: Online e Cirúrgico</p>'));
+app.get('/', (req, res) => res.send('<h1>Horizon AI v8.0 - DEFINITIVO</h1><p>Status: Online</p>'));
 
 // --- HELPER: CHAMADA DE IA ---
-async function callAI(messages, forceJson = false) {
+async function callAI(messages, isAuto = false) {
+  // Se for automático, usamos um prompt de sistema extremamente agressivo e temperatura 0
+  const systemPrompt = isAuto 
+    ? "VOCÊ É UM MOTOR DE CORREÇÃO ORTOGRÁFICA RÍGIDO. Sua única função é corrigir o texto. NÃO DIGA 'Bom trabalho', NÃO DÊ EXPLICAÇÕES. Se houver erro, retorne APENAS o texto corrigido. Se NÃO houver erro, retorne APENAS o texto original. NUNCA responda com frases de cortesia."
+    : "Você é um assistente útil. Responda sempre em Português (Brasil).";
+
   const payload = {
     model: "llama-3.3-70b-versatile",
-    messages: messages,
-    temperature: 0.1, // Temperatura baixa para maior precisão na correção
-    response_format: forceJson ? { type: "json_object" } : undefined
+    messages: [{ role: "system", content: systemPrompt }, ...messages],
+    temperature: 0, // Zero para máxima precisão e zero criatividade
+    max_tokens: 1000
   };
 
   try {
     const res = await axios.post('https://api.groq.com/openai/v1/chat/completions', payload, {
-      headers: { 'Authorization': `Bearer ${GROQ_API_KEY}` }, 
-      timeout: 15000
+      headers: { 'Authorization': `Bearer ${GROQ_API_KEY}` },
+      timeout: 10000
     });
     return res.data.choices[0].message.content;
   } catch (e) {
     console.error("Erro Groq:", e.message);
-    // Fallback Pollinations se Groq falhar
+    // Fallback Pollinations
     try {
-      const freeRes = await axios.post('https://text.pollinations.ai/', { messages }, { timeout: 15000 });
+      const freeRes = await axios.post('https://text.pollinations.ai/', { 
+        messages: [{ role: "system", content: systemPrompt }, ...messages] 
+      }, { timeout: 10000 });
       return freeRes.data;
     } catch (err) {
-      return "Erro na conexão com a IA.";
+      return "Erro de conexão.";
     }
   }
 }
 
 // --- ENDPOINT PRINCIPAL ---
 app.post(['/api/completions/v1', '/api/chat/completions', '/api/completions'], async (req, res) => {
-  const body = req.body;
-  const messages = body.messages || [];
+  const messages = req.body.messages || [];
+  const bodyStr = JSON.stringify(req.body).toLowerCase();
   const lastMessage = messages.length > 0 ? messages[messages.length - 1].content : "";
-  const bodyStr = JSON.stringify(body).toLowerCase();
 
   try {
-    // Identifica se é Verificação Gramatical Completa (com explicação)
     const isGrammarFull = bodyStr.includes('check the grammar') && bodyStr.includes('explanation');
-    // Identifica se é Ortografia Automática (gatilho principal que estava falhando)
     const isAutoGrammar = bodyStr.includes('just return the correct result');
 
-    let aiResponse;
+    let finalPayload;
 
     if (isGrammarFull) {
-      const system = `Você é um corretor gramatical. Responda APENAS em JSON: {"original": "texto original", "improved": "texto corrigido", "explanation": "explicação curta em português"}`;
-      const raw = await callAI([{ role: "system", content: system }, ...messages], true);
-      try {
-        aiResponse = JSON.parse(raw);
-      } catch (e) {
-        aiResponse = { original: lastMessage, improved: raw, explanation: "Correção aplicada." };
-      }
+      // Formato Objeto Completo
+      const text = await callAI(messages, true);
+      finalPayload = {
+        original: lastMessage,
+        improved: text.replace(/^"|"$/g, '').trim(),
+        explanation: "Correção ortográfica e gramatical aplicada para melhorar a clareza."
+      };
     } else if (isAutoGrammar) {
-      // Lógica cirúrgica para Ortografia Automática
-      const system = "Você é um motor de autocorreção. Retorne APENAS o texto corrigido. Sem aspas, sem explicações, sem introduções. Se o texto estiver correto, retorne o texto original.";
-      const text = await callAI([{ role: "system", content: system }, ...messages]);
-      // Limpa a resposta de possíveis aspas ou lixo da IA
-      const cleanedText = text.replace(/^"|"$/g, '').trim();
-      aiResponse = { improved: cleanedText };
+      // Formato de Autocorreção (O ponto principal)
+      const text = await callAI(messages, true);
+      const cleaned = text.replace(/^"|"$/g, '').trim();
+      
+      // Se a IA retornar algo como "Sua gramática está correta", nós forçamos o texto original
+      if (cleaned.toLowerCase().includes("gramática") || cleaned.toLowerCase().includes("bom trabalho")) {
+        finalPayload = { improved: lastMessage };
+      } else {
+        finalPayload = { improved: cleaned };
+      }
     } else {
-      // Chat normal ou outras funções
-      const system = "Você é um assistente útil. Responda sempre em Português (Brasil).";
-      const text = await callAI([{ role: "system", content: system }, ...messages]);
-      aiResponse = { content: text };
+      // Chat normal
+      const text = await callAI(messages, false);
+      finalPayload = { content: text };
     }
 
-    // O App Android (Retrofit) espera um stream SSE com um JSON específico dentro do delta.content
+    // CONFIGURAÇÃO SSE CRÍTICA PARA RETROFIT
     res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');
 
-    const sseData = {
+    // O segredo para evitar o erro BEGIN_OBJECT:
+    // O Retrofit espera que o "content" dentro do delta seja uma STRING que representa o JSON
+    const sseResponse = {
       choices: [{
         delta: {
-          content: typeof aiResponse === 'string' ? aiResponse : JSON.stringify(aiResponse)
+          content: JSON.stringify(finalPayload)
         }
       }]
     };
 
-    res.write(`data: ${JSON.stringify(sseData)}\n\n`);
+    res.write(`data: ${JSON.stringify(sseResponse)}\n\n`);
     res.write('data: [DONE]\n\n');
     res.end();
 
   } catch (error) {
-    console.error("Erro Processamento:", error.message);
-    const errorData = { choices: [{ delta: { content: JSON.stringify({ error: "Erro ao processar" }) } }] };
-    res.write(`data: ${JSON.stringify(errorData)}\n\n`);
+    console.error("Erro Geral:", error.message);
+    res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: JSON.stringify({ improved: lastMessage }) } }] })}\n\n`);
     res.write('data: [DONE]\n\n');
     res.end();
   }
 });
 
-// --- IMAGENS (Pollinations) ---
+// --- IMAGENS ---
 app.post('/api/image-generator', (req, res) => {
   const id = crypto.randomUUID();
   const prompt = req.body.prompt || "image";
@@ -112,4 +120,4 @@ app.post('/api/image-generator', (req, res) => {
   res.json({ data: { generationId: id, taskId: id, status: 'completed', percentage: '100', imageUrls: [{ url }] } });
 });
 
-app.listen(PORT, () => console.log(`Servidor Horizon AI v7.0 rodando na porta ${PORT}`));
+app.listen(PORT, () => console.log(`Servidor v8.0 DEFINITIVO rodando na porta ${PORT}`));
