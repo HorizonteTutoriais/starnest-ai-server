@@ -10,14 +10,9 @@ app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 
 const GROQ_API_KEY = process.env.GROQ_API_KEY || '';
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
 
-const imageTasks = new Map();
-
-// --- DASHBOARD DE STATUS ---
-app.get('/', (req, res) => {
-  res.send(`<h1>Horizon AI v5.0</h1><p>Status: Online</p><p>Groq: ${GROQ_API_KEY ? "Configurada" : "Ausente"}</p>`);
-});
+// --- DASHBOARD ---
+app.get('/', (req, res) => res.send('<h1>Horizon AI v6.0</h1><p>Status: Online</p>'));
 
 // --- HELPER: CHAMADA DE IA ---
 async function callAI(messages, forceJson = false) {
@@ -29,103 +24,79 @@ async function callAI(messages, forceJson = false) {
   };
 
   try {
-    if (GROQ_API_KEY) {
-      const res = await axios.post('https://api.groq.com/openai/v1/chat/completions', payload, {
-        headers: { 'Authorization': `Bearer ${GROQ_API_KEY}` }, timeout: 15000
-      });
-      return res.data.choices[0].message.content;
-    }
-    // Fallback Grátis
-    const freeRes = await axios.post('https://text.pollinations.ai/', {
-      messages: messages
-    }, { timeout: 15000 });
-    return freeRes.data;
+    const res = await axios.post('https://api.groq.com/openai/v1/chat/completions', payload, {
+      headers: { 'Authorization': `Bearer ${GROQ_API_KEY}` }, timeout: 15000
+    });
+    return res.data.choices[0].message.content;
   } catch (e) {
-    console.error("Erro na chamada de IA:", e.message);
-    throw e;
+    console.error("Erro Groq:", e.message);
+    // Fallback Pollinations
+    const freeRes = await axios.post('https://text.pollinations.ai/', { messages }, { timeout: 15000 });
+    return freeRes.data;
   }
 }
 
-// --- ENDPOINTS DE TEXTO E BUBBLE AI ---
+// --- ENDPOINT PRINCIPAL (CORRIGIDO PARA JSON OBJECT) ---
 app.post(['/api/completions/v1', '/api/chat/completions', '/api/completions'], async (req, res) => {
-  const body = req.body;
-  const bodyStr = JSON.stringify(body).toLowerCase();
-  const messages = body.messages || [];
+  const bodyStr = JSON.stringify(req.body).toLowerCase();
+  const messages = req.body.messages || [];
 
   try {
-    // 1. Identificar se é Gramática que espera JSON
     const isGrammarFull = bodyStr.includes('check the grammar') && bodyStr.includes('explanation');
-    
+    const isAutoGrammar = bodyStr.includes('just return the correct result');
+
+    let system = "Você é um assistente útil. Responda sempre em Português (Brasil).";
+    let aiResponse;
+
     if (isGrammarFull) {
-      const system = `Você é um corretor gramatical rigoroso. Analise o texto e retorne EXATAMENTE este JSON:
-      {"original": "texto do usuário", "improved": "texto corrigido", "explanation": "explicação curta em português"}`;
-      
-      const aiContent = await callAI([{ role: "system", content: system }, ...messages], true);
-      
-      // O app espera o JSON dentro de um fluxo SSE
-      res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
-      res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: aiContent } }] })}\n\n`);
-      res.write('data: [DONE]\n\n');
-      return res.end();
+      system = `Você é um corretor gramatical rigoroso. Retorne EXATAMENTE este JSON:
+      {"original": "...", "improved": "...", "explanation": "..."}`;
+      const raw = await callAI([{ role: "system", content: system }, ...messages], true);
+      aiResponse = JSON.parse(raw); // Converte string em objeto real
+    } else if (isAutoGrammar) {
+      system = "Retorne APENAS o texto corrigido, sem explicações.";
+      const text = await callAI([{ role: "system", content: system }, ...messages]);
+      aiResponse = { improved: text.replace(/"/g, '') }; // Encapsula em objeto
+    } else {
+      const text = await callAI([{ role: "system", content: system }, ...messages]);
+      aiResponse = { content: text }; // Encapsula em objeto
     }
 
-    // 2. Outras funções (Traduzir, Tom, Responder) - Resposta de texto direto via SSE
-    const system = "Você é um assistente útil. Responda sempre em Português (Brasil). Retorne APENAS o resultado solicitado, sem conversas.";
-    const aiContent = await callAI([{ role: "system", content: system }, ...messages]);
-    
+    // O segredo: O app espera um fluxo SSE, mas o conteúdo do fluxo DEVE ser o JSON da escolha
     res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
-    res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: aiContent } }] })}\n\n`);
+    
+    // Envolve a resposta no formato que o Retrofit espera dentro do delta
+    const sseData = {
+      choices: [{
+        delta: {
+          content: typeof aiResponse === 'string' ? aiResponse : JSON.stringify(aiResponse)
+        }
+      }]
+    };
+    
+    res.write(`data: ${JSON.stringify(sseData)}\n\n`);
     res.write('data: [DONE]\n\n');
     res.end();
 
   } catch (error) {
-    console.error("Erro no Completion:", error.message);
-    res.status(500).send("Erro interno");
+    console.error("Erro 400 fix:", error.message);
+    res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: "Erro ao processar IA" } }] })}\n\n`);
+    res.write('data: [DONE]\n\n');
+    res.end();
   }
 });
 
-// --- ENDPOINTS DE IMAGEM ---
+// --- IMAGENS ---
 app.post('/api/image-generator', (req, res) => {
   const id = crypto.randomUUID();
-  const prompt = req.body.prompt || "cool image";
-  const url = `https://image.pollinations.ai/prompt/${encodeURIComponent(prompt)}?width=1024&height=1024&nologo=true&seed=${Math.floor(Math.random()*1000)}`;
-  
-  imageTasks.set(id, { 
-    generationId: id, 
-    taskId: id, 
-    status: 'completed', 
-    percentage: '100', 
-    imageUrls: [{ url: url }] 
-  });
-  
-  // O app espera este formato exato para não dar erro
-  res.json({
-    data: {
-      generationId: id,
-      taskId: id,
-      status: 'completed',
-      percentage: '100',
-      imageUrls: [{ url: url }]
-    }
-  });
+  const url = `https://image.pollinations.ai/prompt/${encodeURIComponent(req.body.prompt)}?width=1024&height=1024&nologo=true`;
+  const task = { generationId: id, taskId: id, status: 'completed', percentage: '100', imageUrls: [{ url }] };
+  imageTasks.set(id, task);
+  res.json({ data: task });
 });
 
-app.get('/api/image-generator/:id', (req, res) => {
-  const task = imageTasks.get(req.params.id);
-  res.json({ data: task || { status: 'failed' } });
-});
+app.get('/api/image-generator/:id', (req, res) => res.json({ data: imageTasks.get(req.params.id) || { status: 'failed' } }));
 
-// --- ENDPOINT DE UPLOAD (VISÃO) ---
-app.post('/api/upload', (req, res) => {
-  res.json({
-    status: "success",
-    data: {
-      url: "https://via.placeholder.com/150",
-      message: "Upload successful"
-    }
-  });
-});
+app.post('/api/upload', (req, res) => res.json({ status: "success", data: { url: "https://via.placeholder.com/150" } }));
 
-app.get('/health', (req, res) => res.json({ status: "ok" }));
-
-app.listen(PORT, () => console.log(`Servidor v5.0 Ativo na porta ${PORT}`));
+app.listen(PORT, () => console.log(`Servidor v6.0 rodando na porta ${PORT}`));
