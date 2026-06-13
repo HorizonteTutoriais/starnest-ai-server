@@ -13,7 +13,7 @@ const GROQ_API_URL = 'https://api.groq.com/openai/v1/chat/completions';
 const GROQ_API_KEY = process.env.GROQ_API_KEY || '';
 
 // --- DASHBOARD ---
-app.get('/', (req, res) => res.send('<h1>Horizon AI v17.0 - SOLUÇÃO FINAL</h1><p>Status: Online</p>'));
+app.get('/', (req, res) => res.send('<h1>Horizon AI v18.0 - DEFINITIVO</h1><p>Status: Online</p>'));
 
 // --- HELPER: CHAMADA DE IA ---
 async function callAI(messages, systemPrompt, temperature = 0.7) {
@@ -47,12 +47,13 @@ app.post('*', async (req, res) => {
 
   try {
     if (isGrammar) {
+      // 1. PARA GRAMÁTICA: RESPOSTA JSON ESTÁTICA (NÃO SSE)
       const systemPrompt = `Você é um motor de correção gramatical. Analise o texto e retorne APENAS um objeto JSON válido com estas chaves: 
       "original": o texto enviado pelo usuário,
-      "improved": o texto corrigido (se não houver erro, faça uma pequena melhoria),
+      "improved": o texto corrigido,
       "explanation": "Correção aplicada.",
       "isCorrect": false.
-      NÃO escreva nada fora do JSON.`;
+      NÃO use markdown, retorne apenas o JSON puro.`;
       
       const aiResult = await callAI(messages, systemPrompt, 0);
       let finalJson;
@@ -71,27 +72,12 @@ app.post('*', async (req, res) => {
         };
       }
 
-      // O SEGREDO CIRÚRGICO: O APK ESPERA O JSON NO CAMPO CONTENT, MAS COM FINISH_REASON "STOP"
-      // E TAMBÉM PODE ESTAR ESPERANDO O JSON DIRETO. VAMOS MANDAR OS DOIS!
-      res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
-      res.setHeader('Cache-Control', 'no-cache');
-      res.setHeader('Connection', 'keep-alive');
+      // IMPORTANTE: ENVIAR COMO JSON PURO, SEM PROTOCOLO SSE
+      res.setHeader('Content-Type', 'application/json; charset=utf-8');
+      return res.status(200).json(finalJson);
 
-      const chunk = {
-        choices: [{
-          delta: { content: JSON.stringify(finalJson) },
-          index: 0,
-          finish_reason: "stop"
-        }],
-        // Alguns parsers de Retrofit esperam o objeto na raiz se o delta falhar
-        ...finalJson
-      };
-
-      res.write(`data: ${JSON.stringify(chunk)}\n\n`);
-      res.write('data: [DONE]\n\n');
-      return res.end();
     } else {
-      // CHAT NORMAL
+      // 2. PARA CHAT: RESPOSTA SSE (STREAM)
       const systemPrompt = "Você é um assistente de IA útil. Responda sempre em Português (Brasil).";
       const aiResult = await callAI(messages, systemPrompt, 0.7);
       const contentToSend = aiResult || "Desculpe, não consegui processar sua mensagem.";
@@ -114,7 +100,7 @@ app.post('*', async (req, res) => {
     }
   } catch (error) {
     console.error("Erro:", error.message);
-    res.end();
+    res.status(500).end();
   }
 });
 
@@ -126,4 +112,4 @@ app.post('/api/image-generator', (req, res) => {
   res.json({ data: { generationId: id, taskId: id, status: 'completed', percentage: '100', imageUrls: [{ url }] } });
 });
 
-app.listen(PORT, () => console.log(`Servidor v17.0 FINAL rodando na porta ${PORT}`));
+app.listen(PORT, () => console.log(`Servidor v18.0 FINAL rodando na porta ${PORT}`));
