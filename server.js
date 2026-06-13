@@ -13,7 +13,7 @@ const GROQ_API_URL = 'https://api.groq.com/openai/v1/chat/completions';
 const GROQ_API_KEY = process.env.GROQ_API_KEY || '';
 
 // --- DASHBOARD ---
-app.get('/', (req, res) => res.send('<h1>Horizon AI v19.0 - SOLUÇÃO CIRÚRGICA</h1><p>Status: Online</p>'));
+app.get('/', (req, res) => res.send('<h1>Horizon AI v20.0 - DEFINITIVO</h1><p>Status: Online</p>'));
 
 // --- HELPER: CHAMADA DE IA ---
 async function callAI(messages, systemPrompt, temperature = 0.7) {
@@ -49,7 +49,6 @@ app.post('*', async (req, res) => {
     let contentToSend;
 
     if (isGrammar) {
-      // PROMPT PARA GRAMÁTICA (JSON)
       const systemPrompt = `Você é um motor de correção gramatical. Analise o texto e retorne APENAS um objeto JSON válido com estas chaves: 
       "original": o texto enviado pelo usuário,
       "improved": o texto corrigido,
@@ -81,18 +80,23 @@ app.post('*', async (req, res) => {
       }
       contentToSend = JSON.stringify(finalJson);
     } else {
-      // CHAT NORMAL
       const systemPrompt = "Você é um assistente de IA útil. Responda sempre em Português (Brasil).";
       const aiResult = await callAI(messages, systemPrompt, 0.7);
       contentToSend = aiResult || "Desculpe, não consegui processar sua mensagem.";
     }
 
-    // PROTOCOLO SSE (STREAM) - USADO TANTO PARA CHAT QUANTO PARA GRAMÁTICA
+    // PROTOCOLO SSE (STREAM) - EXATAMENTE COMO O MODELO TextCompletionStreamResult ESPERA
     res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');
 
+    const resultId = `chatcmpl-${crypto.randomBytes(12).toString('hex')}`;
+    const created = Math.floor(Date.now() / 1000);
+
     const chunk = {
+      id: resultId,
+      object: "chat.completion.chunk",
+      created: created,
       choices: [{
         delta: { content: contentToSend },
         index: 0,
@@ -118,4 +122,4 @@ app.post('/api/image-generator', (req, res) => {
   res.json({ data: { generationId: id, taskId: id, status: 'completed', percentage: '100', imageUrls: [{ url }] } });
 });
 
-app.listen(PORT, () => console.log(`Servidor v19.0 FINAL rodando na porta ${PORT}`));
+app.listen(PORT, () => console.log(`Servidor v20.0 DEFINITIVO rodando na porta ${PORT}`));
