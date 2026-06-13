@@ -13,7 +13,7 @@ const GROQ_API_URL = 'https://api.groq.com/openai/v1/chat/completions';
 const GROQ_API_KEY = process.env.GROQ_API_KEY || '';
 
 // --- DASHBOARD ---
-app.get('/', (req, res) => res.send('<h1>Horizon AI v11.0 - DEFINITIVO</h1><p>Status: Online</p>'));
+app.get('/', (req, res) => res.send('<h1>Horizon AI v12.0 - DEFINITIVO</h1><p>Status: Online</p>'));
 
 // --- HELPER: CHAMADA DE IA ---
 async function callAI(messages, systemPrompt, temperature = 0.7) {
@@ -43,7 +43,7 @@ app.post(['/api/completions/v1', '/api/chat/completions', '/api/completions'], a
   const lastMessage = messages.length > 0 ? messages[messages.length - 1].content : "";
 
   try {
-    // 1. Identificar a função solicitada pelo APK
+    // 1. IDENTIFICAR O TIPO DE CHAMADA
     const isGrammarFull = bodyStr.includes('check the grammar') && bodyStr.includes('explanation');
     const isAutoGrammar = bodyStr.includes('just return the correct result');
 
@@ -75,13 +75,26 @@ app.post(['/api/completions/v1', '/api/chat/completions', '/api/completions'], a
         };
       }
 
-      // IMPORTANTE: Para Gramática, o APK NÃO usa SSE, ele espera um JSON direto!
-      // Mas como o endpoint é o mesmo, vamos enviar o JSON direto sem o formato de stream choices/delta
-      return res.json(finalJson);
+      // O SEGREDO: O APK DE GRAMÁTICA ESPERA O JSON DENTRO DO CAMPO CONTENT DO SSE TAMBÉM!
+      // Vamos enviar nos dois formatos para garantir.
+      res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+      res.setHeader('Cache-Control', 'no-cache');
+      res.setHeader('Connection', 'keep-alive');
+
+      const sseData = {
+        choices: [{
+          delta: {
+            content: JSON.stringify(finalJson)
+          }
+        }]
+      };
+
+      res.write(`data: ${JSON.stringify(sseData)}\n\n`);
+      res.write('data: [DONE]\n\n');
+      return res.end();
     } 
     
     // 2. CHAT NORMAL (SSE)
-    // Se não for gramática, usamos o formato SSE que fez o chat funcionar
     const systemPrompt = "Você é um assistente de IA útil. Responda sempre em Português (Brasil).";
     const aiResult = await callAI(messages, systemPrompt, 0.7);
     const contentToSend = aiResult || "Desculpe, não consegui processar sua mensagem.";
@@ -116,4 +129,4 @@ app.post('/api/image-generator', (req, res) => {
   res.json({ data: { generationId: id, taskId: id, status: 'completed', percentage: '100', imageUrls: [{ url }] } });
 });
 
-app.listen(PORT, () => console.log(`Servidor v11.0 DEFINITIVO rodando na porta ${PORT}`));
+app.listen(PORT, () => console.log(`Servidor v12.0 DEFINITIVO rodando na porta ${PORT}`));
