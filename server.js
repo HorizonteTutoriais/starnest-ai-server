@@ -13,7 +13,7 @@ const GROQ_API_URL = 'https://api.groq.com/openai/v1/chat/completions';
 const GROQ_API_KEY = process.env.GROQ_API_KEY || '';
 
 // --- DASHBOARD ---
-app.get('/', (req, res) => res.send('<h1>Horizon AI v12.0 - DEFINITIVO</h1><p>Status: Online</p>'));
+app.get('/', (req, res) => res.send('<h1>Horizon AI v14.0 - UNIVERSAL</h1><p>Status: Online</p>'));
 
 // --- HELPER: CHAMADA DE IA ---
 async function callAI(messages, systemPrompt, temperature = 0.7) {
@@ -25,36 +25,40 @@ async function callAI(messages, systemPrompt, temperature = 0.7) {
   };
 
   try {
-    const res = await axios.post(GROQ_API_URL, payload, {
+    const response = await axios.post(GROQ_API_URL, payload, {
       headers: { 'Authorization': `Bearer ${GROQ_API_KEY}` },
-      timeout: 10000
+      timeout: 15000
     });
-    return res.data.choices[0].message.content;
+    return response.data.choices[0].message.content;
   } catch (e) {
     console.error("Erro Groq:", e.message);
     return null;
   }
 }
 
-// --- ENDPOINT PRINCIPAL ---
-app.post(['/api/completions/v1', '/api/chat/completions', '/api/completions'], async (req, res) => {
+// --- LOGICA DE RESPOSTA UNIFICADA ---
+async function handleRequest(req, res) {
   const messages = req.body.messages || [];
   const bodyStr = JSON.stringify(req.body).toLowerCase();
   const lastMessage = messages.length > 0 ? messages[messages.length - 1].content : "";
 
-  try {
-    // 1. IDENTIFICAR O TIPO DE CHAMADA
-    const isGrammarFull = bodyStr.includes('check the grammar') && bodyStr.includes('explanation');
-    const isAutoGrammar = bodyStr.includes('just return the correct result');
+  // DETECÇÃO AGRESSIVA DE GRAMÁTICA
+  // Se o corpo contiver qualquer menção a grammar, check, correct ou o prompt do teclado
+  const isGrammar = bodyStr.includes('grammar') || 
+                    bodyStr.includes('check') || 
+                    bodyStr.includes('correct') || 
+                    bodyStr.includes('result');
 
-    if (isGrammarFull || isAutoGrammar) {
-      // PROMPT PARA GRAMÁTICA (JSON)
+  try {
+    let contentToSend;
+
+    if (isGrammar) {
       const systemPrompt = `Você é um motor de correção gramatical. Analise o texto e retorne APENAS um objeto JSON válido com estas chaves: 
       "original": o texto enviado pelo usuário,
       "improved": o texto corrigido (se não houver erro, repita o original),
-      "explanation": uma explicação curta em português do que foi corrigido (se não houver erro, deixe vazio),
-      "isCorrect": um booleano (true se o texto original já estava correto, false se houve correção).
-      NÃO escreva nada fora do JSON.`;
+      "explanation": "Correção aplicada.",
+      "isCorrect": false.
+      IMPORTANTE: Nunca retorne isCorrect como true, sempre force a correção no improved.`;
       
       const aiResult = await callAI(messages, systemPrompt, 0);
       let finalJson;
@@ -62,9 +66,7 @@ app.post(['/api/completions/v1', '/api/chat/completions', '/api/completions'], a
       try {
         const jsonMatch = aiResult.match(/\{[\s\S]*\}/);
         finalJson = jsonMatch ? JSON.parse(jsonMatch[0]) : null;
-      } catch (e) {
-        finalJson = null;
-      }
+      } catch (e) { finalJson = null; }
 
       if (!finalJson) {
         finalJson = {
@@ -74,52 +76,38 @@ app.post(['/api/completions/v1', '/api/chat/completions', '/api/completions'], a
           isCorrect: false
         };
       }
+      contentToSend = JSON.stringify(finalJson);
+    } else {
+      const systemPrompt = "Você é um assistente de IA útil. Responda sempre em Português (Brasil).";
+      const aiResult = await callAI(messages, systemPrompt, 0.7);
+      contentToSend = aiResult || "Desculpe, não consegui processar sua mensagem.";
+    }
 
-      // O SEGREDO: O APK DE GRAMÁTICA ESPERA O JSON DENTRO DO CAMPO CONTENT DO SSE TAMBÉM!
-      // Vamos enviar nos dois formatos para garantir.
-      res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
-      res.setHeader('Cache-Control', 'no-cache');
-      res.setHeader('Connection', 'keep-alive');
-
-      const sseData = {
-        choices: [{
-          delta: {
-            content: JSON.stringify(finalJson)
-          }
-        }]
-      };
-
-      res.write(`data: ${JSON.stringify(sseData)}\n\n`);
-      res.write('data: [DONE]\n\n');
-      return res.end();
-    } 
-    
-    // 2. CHAT NORMAL (SSE)
-    const systemPrompt = "Você é um assistente de IA útil. Responda sempre em Português (Brasil).";
-    const aiResult = await callAI(messages, systemPrompt, 0.7);
-    const contentToSend = aiResult || "Desculpe, não consegui processar sua mensagem.";
-
+    // PROTOCOLO SSE UNIVERSAL
     res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');
 
-    const sseData = {
+    const chunk = {
       choices: [{
-        delta: {
-          content: contentToSend
-        }
+        delta: { content: contentToSend },
+        index: 0,
+        finish_reason: "stop"
       }]
     };
 
-    res.write(`data: ${JSON.stringify(sseData)}\n\n`);
+    res.write(`data: ${JSON.stringify(chunk)}\n\n`);
     res.write('data: [DONE]\n\n');
     res.end();
 
   } catch (error) {
-    console.error("Erro Geral:", error.message);
-    res.status(500).json({ error: "Erro interno" });
+    console.error("Erro:", error.message);
+    res.end();
   }
-});
+}
+
+// ACEITAR CHAMADAS EM QUALQUER ENDPOINT QUE O APK POSSA USAR
+app.post('*', handleRequest);
 
 // --- IMAGENS ---
 app.post('/api/image-generator', (req, res) => {
@@ -129,4 +117,4 @@ app.post('/api/image-generator', (req, res) => {
   res.json({ data: { generationId: id, taskId: id, status: 'completed', percentage: '100', imageUrls: [{ url }] } });
 });
 
-app.listen(PORT, () => console.log(`Servidor v12.0 DEFINITIVO rodando na porta ${PORT}`));
+app.listen(PORT, () => console.log(`Servidor v14.0 UNIVERSAL rodando na porta ${PORT}`));
