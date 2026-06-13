@@ -13,7 +13,7 @@ const GROQ_API_URL = 'https://api.groq.com/openai/v1/chat/completions';
 const GROQ_API_KEY = process.env.GROQ_API_KEY || '';
 
 // --- DASHBOARD ---
-app.get('/', (req, res) => res.send('<h1>Horizon AI v18.0 - DEFINITIVO</h1><p>Status: Online</p>'));
+app.get('/', (req, res) => res.send('<h1>Horizon AI v19.0 - SOLUÇÃO CIRÚRGICA</h1><p>Status: Online</p>'));
 
 // --- HELPER: CHAMADA DE IA ---
 async function callAI(messages, systemPrompt, temperature = 0.7) {
@@ -46,14 +46,19 @@ app.post('*', async (req, res) => {
   const isGrammar = bodyStr.includes('grammar') || bodyStr.includes('check') || bodyStr.includes('correct') || bodyStr.includes('result');
 
   try {
+    let contentToSend;
+
     if (isGrammar) {
-      // 1. PARA GRAMÁTICA: RESPOSTA JSON ESTÁTICA (NÃO SSE)
+      // PROMPT PARA GRAMÁTICA (JSON)
       const systemPrompt = `Você é um motor de correção gramatical. Analise o texto e retorne APENAS um objeto JSON válido com estas chaves: 
       "original": o texto enviado pelo usuário,
       "improved": o texto corrigido,
       "explanation": "Correção aplicada.",
-      "isCorrect": false.
-      NÃO use markdown, retorne apenas o JSON puro.`;
+      "isCorrect": false,
+      "index": 0,
+      "grammarExtensionType": "AUTO_CHECK",
+      "rawOutput": "Correção aplicada."
+      NÃO escreva nada fora do JSON.`;
       
       const aiResult = await callAI(messages, systemPrompt, 0);
       let finalJson;
@@ -68,39 +73,40 @@ app.post('*', async (req, res) => {
           original: lastMessage,
           improved: aiResult || lastMessage,
           explanation: "Correção aplicada.",
-          isCorrect: false
+          isCorrect: false,
+          index: 0,
+          grammarExtensionType: "AUTO_CHECK",
+          rawOutput: "Correção aplicada."
         };
       }
-
-      // IMPORTANTE: ENVIAR COMO JSON PURO, SEM PROTOCOLO SSE
-      res.setHeader('Content-Type', 'application/json; charset=utf-8');
-      return res.status(200).json(finalJson);
-
+      contentToSend = JSON.stringify(finalJson);
     } else {
-      // 2. PARA CHAT: RESPOSTA SSE (STREAM)
+      // CHAT NORMAL
       const systemPrompt = "Você é um assistente de IA útil. Responda sempre em Português (Brasil).";
       const aiResult = await callAI(messages, systemPrompt, 0.7);
-      const contentToSend = aiResult || "Desculpe, não consegui processar sua mensagem.";
-
-      res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
-      res.setHeader('Cache-Control', 'no-cache');
-      res.setHeader('Connection', 'keep-alive');
-
-      const chunk = {
-        choices: [{
-          delta: { content: contentToSend },
-          index: 0,
-          finish_reason: "stop"
-        }]
-      };
-
-      res.write(`data: ${JSON.stringify(chunk)}\n\n`);
-      res.write('data: [DONE]\n\n');
-      return res.end();
+      contentToSend = aiResult || "Desculpe, não consegui processar sua mensagem.";
     }
+
+    // PROTOCOLO SSE (STREAM) - USADO TANTO PARA CHAT QUANTO PARA GRAMÁTICA
+    res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+
+    const chunk = {
+      choices: [{
+        delta: { content: contentToSend },
+        index: 0,
+        finish_reason: "stop"
+      }]
+    };
+
+    res.write(`data: ${JSON.stringify(chunk)}\n\n`);
+    res.write('data: [DONE]\n\n');
+    return res.end();
+
   } catch (error) {
     console.error("Erro:", error.message);
-    res.status(500).end();
+    res.end();
   }
 });
 
@@ -112,4 +118,4 @@ app.post('/api/image-generator', (req, res) => {
   res.json({ data: { generationId: id, taskId: id, status: 'completed', percentage: '100', imageUrls: [{ url }] } });
 });
 
-app.listen(PORT, () => console.log(`Servidor v18.0 FINAL rodando na porta ${PORT}`));
+app.listen(PORT, () => console.log(`Servidor v19.0 FINAL rodando na porta ${PORT}`));
