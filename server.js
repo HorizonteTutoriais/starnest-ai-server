@@ -13,7 +13,7 @@ const GROQ_API_URL = 'https://api.groq.com/openai/v1/chat/completions';
 const GROQ_API_KEY = process.env.GROQ_API_KEY || '';
 
 // --- DASHBOARD ---
-app.get('/', (req, res) => res.send('<h1>Horizon AI v15.0 - DEFINITIVO</h1><p>Status: Online</p>'));
+app.get('/', (req, res) => res.send('<h1>Horizon AI v16.0 - DEFINITIVO</h1><p>Status: Online</p>'));
 
 // --- HELPER: CHAMADA DE IA ---
 async function callAI(messages, systemPrompt, temperature = 0.7) {
@@ -42,8 +42,8 @@ app.post('*', async (req, res) => {
   const bodyStr = JSON.stringify(req.body).toLowerCase();
   const lastMessage = messages.length > 0 ? messages[messages.length - 1].content : "";
 
-  // DETECÇÃO DE GRAMÁTICA (MÉTODO ESTÁTICO)
-  const isGrammar = bodyStr.includes('grammar') || bodyStr.includes('check') || bodyStr.includes('correct');
+  // DETECÇÃO DE GRAMÁTICA
+  const isGrammar = bodyStr.includes('grammar') || bodyStr.includes('check') || bodyStr.includes('correct') || bodyStr.includes('result');
 
   try {
     if (isGrammar) {
@@ -52,7 +52,7 @@ app.post('*', async (req, res) => {
       "improved": o texto corrigido,
       "explanation": "Correção aplicada.",
       "isCorrect": false.
-      IMPORTANTE: Retorne APENAS o JSON, sem markdown, sem texto extra.`;
+      NÃO escreva nada fora do JSON.`;
       
       const aiResult = await callAI(messages, systemPrompt, 0);
       let finalJson;
@@ -71,10 +71,25 @@ app.post('*', async (req, res) => {
         };
       }
 
-      // PARA GRAMÁTICA: ENVIAR JSON PURO (NÃO SSE)
-      return res.status(200).json(finalJson);
+      // O SEGREDO FINAL: O APK ESPERA O JSON DENTRO DO SSE, MAS EM UM FORMATO ESPECÍFICO DE CHUNK
+      res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+      res.setHeader('Cache-Control', 'no-cache');
+      res.setHeader('Connection', 'keep-alive');
+
+      // Enviamos o JSON como uma string única dentro do delta
+      const chunk = {
+        choices: [{
+          delta: { content: JSON.stringify(finalJson) },
+          index: 0,
+          finish_reason: "stop"
+        }]
+      };
+
+      res.write(`data: ${JSON.stringify(chunk)}\n\n`);
+      res.write('data: [DONE]\n\n');
+      return res.end();
     } else {
-      // PARA CHAT: ENVIAR SSE (STREAM)
+      // CHAT NORMAL
       const systemPrompt = "Você é um assistente de IA útil. Responda sempre em Português (Brasil).";
       const aiResult = await callAI(messages, systemPrompt, 0.7);
       const contentToSend = aiResult || "Desculpe, não consegui processar sua mensagem.";
@@ -97,7 +112,7 @@ app.post('*', async (req, res) => {
     }
   } catch (error) {
     console.error("Erro:", error.message);
-    return res.status(500).end();
+    res.end();
   }
 });
 
@@ -109,4 +124,4 @@ app.post('/api/image-generator', (req, res) => {
   res.json({ data: { generationId: id, taskId: id, status: 'completed', percentage: '100', imageUrls: [{ url }] } });
 });
 
-app.listen(PORT, () => console.log(`Servidor v15.0 DEFINITIVO rodando na porta ${PORT}`));
+app.listen(PORT, () => console.log(`Servidor v16.0 DEFINITIVO rodando na porta ${PORT}`));
