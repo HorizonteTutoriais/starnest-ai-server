@@ -13,7 +13,7 @@ const GROQ_API_URL = 'https://api.groq.com/openai/v1/chat/completions';
 const GROQ_API_KEY = process.env.GROQ_API_KEY || '';
 
 // --- DASHBOARD ---
-app.get('/', (req, res) => res.send('<h1>Horizon AI v14.0 - UNIVERSAL</h1><p>Status: Online</p>'));
+app.get('/', (req, res) => res.send('<h1>Horizon AI v15.0 - DEFINITIVO</h1><p>Status: Online</p>'));
 
 // --- HELPER: CHAMADA DE IA ---
 async function callAI(messages, systemPrompt, temperature = 0.7) {
@@ -36,29 +36,23 @@ async function callAI(messages, systemPrompt, temperature = 0.7) {
   }
 }
 
-// --- LOGICA DE RESPOSTA UNIFICADA ---
-async function handleRequest(req, res) {
+// --- LOGICA DE RESPOSTA ---
+app.post('*', async (req, res) => {
   const messages = req.body.messages || [];
   const bodyStr = JSON.stringify(req.body).toLowerCase();
   const lastMessage = messages.length > 0 ? messages[messages.length - 1].content : "";
 
-  // DETECÇÃO AGRESSIVA DE GRAMÁTICA
-  // Se o corpo contiver qualquer menção a grammar, check, correct ou o prompt do teclado
-  const isGrammar = bodyStr.includes('grammar') || 
-                    bodyStr.includes('check') || 
-                    bodyStr.includes('correct') || 
-                    bodyStr.includes('result');
+  // DETECÇÃO DE GRAMÁTICA (MÉTODO ESTÁTICO)
+  const isGrammar = bodyStr.includes('grammar') || bodyStr.includes('check') || bodyStr.includes('correct');
 
   try {
-    let contentToSend;
-
     if (isGrammar) {
       const systemPrompt = `Você é um motor de correção gramatical. Analise o texto e retorne APENAS um objeto JSON válido com estas chaves: 
       "original": o texto enviado pelo usuário,
-      "improved": o texto corrigido (se não houver erro, repita o original),
+      "improved": o texto corrigido,
       "explanation": "Correção aplicada.",
       "isCorrect": false.
-      IMPORTANTE: Nunca retorne isCorrect como true, sempre force a correção no improved.`;
+      IMPORTANTE: Retorne APENAS o JSON, sem markdown, sem texto extra.`;
       
       const aiResult = await callAI(messages, systemPrompt, 0);
       let finalJson;
@@ -76,38 +70,36 @@ async function handleRequest(req, res) {
           isCorrect: false
         };
       }
-      contentToSend = JSON.stringify(finalJson);
+
+      // PARA GRAMÁTICA: ENVIAR JSON PURO (NÃO SSE)
+      return res.status(200).json(finalJson);
     } else {
+      // PARA CHAT: ENVIAR SSE (STREAM)
       const systemPrompt = "Você é um assistente de IA útil. Responda sempre em Português (Brasil).";
       const aiResult = await callAI(messages, systemPrompt, 0.7);
-      contentToSend = aiResult || "Desculpe, não consegui processar sua mensagem.";
+      const contentToSend = aiResult || "Desculpe, não consegui processar sua mensagem.";
+
+      res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+      res.setHeader('Cache-Control', 'no-cache');
+      res.setHeader('Connection', 'keep-alive');
+
+      const chunk = {
+        choices: [{
+          delta: { content: contentToSend },
+          index: 0,
+          finish_reason: "stop"
+        }]
+      };
+
+      res.write(`data: ${JSON.stringify(chunk)}\n\n`);
+      res.write('data: [DONE]\n\n');
+      return res.end();
     }
-
-    // PROTOCOLO SSE UNIVERSAL
-    res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
-    res.setHeader('Cache-Control', 'no-cache');
-    res.setHeader('Connection', 'keep-alive');
-
-    const chunk = {
-      choices: [{
-        delta: { content: contentToSend },
-        index: 0,
-        finish_reason: "stop"
-      }]
-    };
-
-    res.write(`data: ${JSON.stringify(chunk)}\n\n`);
-    res.write('data: [DONE]\n\n');
-    res.end();
-
   } catch (error) {
     console.error("Erro:", error.message);
-    res.end();
+    return res.status(500).end();
   }
-}
-
-// ACEITAR CHAMADAS EM QUALQUER ENDPOINT QUE O APK POSSA USAR
-app.post('*', handleRequest);
+});
 
 // --- IMAGENS ---
 app.post('/api/image-generator', (req, res) => {
@@ -117,4 +109,4 @@ app.post('/api/image-generator', (req, res) => {
   res.json({ data: { generationId: id, taskId: id, status: 'completed', percentage: '100', imageUrls: [{ url }] } });
 });
 
-app.listen(PORT, () => console.log(`Servidor v14.0 UNIVERSAL rodando na porta ${PORT}`));
+app.listen(PORT, () => console.log(`Servidor v15.0 DEFINITIVO rodando na porta ${PORT}`));
