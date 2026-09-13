@@ -2,153 +2,329 @@ const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
 const crypto = require('crypto');
+const multer = require('multer');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-app.use(cors());
+app.use(cors({ origin: '*' }));
 app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
-// Configurações de API
-// Usaremos GROQ como principal por ser rápido e gratuito para testes, 
-// mas os formatos de resposta serão adaptados para o que o APK espera.
+// Groq - OpenAI compatible API.
+// Qwen 3.6 27B supports text + vision and is the single model used here
+// for chat, grammar, correction, tone and image understanding.
 const GROQ_API_URL = 'https://api.groq.com/openai/v1/chat/completions';
 const GROQ_API_KEY = process.env.GROQ_API_KEY || '';
+const GROQ_MODEL = process.env.GROQ_MODEL || 'qwen/qwen3.6-27b';
 
-// Cache em memória para tarefas de imagem (Polling)
+// Image generation remains compatible with the APK's existing polling flow.
 const imageTasks = new Map();
 
-// --- HELPER: Formatação de Resposta SSE ---
-function sendSSE(res, content) {
+// Accept multipart uploads if the APK uses /api/upload.
+const upload = multer({
+    storage: multer.memoryStorage(),
+    limits: { fileSize: 20 * 1024 * 1024 }
+});
+
+function setSSEHeaders(res) {
     res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
-    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
     res.setHeader('Connection', 'keep-alive');
-    
-    const sseData = {
-        choices: [{ delta: { content: content } }]
-    };
-    res.write(`data: ${JSON.stringify(sseData)}\n\n`);
+    res.flushHeaders?.();
+}
+
+function sendSSE(res, content) {
+    setSSEHeaders(res);
+    const data = { choices: [{ delta: { content: String(content ?? '') } }] };
+    res.write(`data: ${JSON.stringify(data)}\n\n`);
     res.write('data: [DONE]\n\n');
     res.end();
 }
 
-// --- ENDPOINTS DE GRAMÁTICA E TEXTO ---
+function sendSSEError(res, message, status = 500) {
+    if (!res.headersSent) res.status(status);
+    sendSSE(res, message);
+}
+
+function extractText(content) {
+    if (typeof content === 'string') return content;
+    if (!Array.isArray(content)) return content == null ? '' : JSON.stringify(content);
+
+    return content
+        .filter(part => part && part.type === 'text')
+        .map(part => part.text || '')
+        .join('\n');
+}
+
+function hasImage(messages) {
+    return messages.some(message =>
+        Array.isArray(message?.content) &&
+        message.content.some(part => part?.type === 'image_url' && part?.image_url?.url)
+    );
+}
+
+function normalizeMessages(messages) {
+    if (!Array.isArray(messages)) return [];
+
+    return messages
+        .filter(m => m && m.role)
+        .map(m => ({
+            role: m.role,
+            // IMPORTANT: preserve image_url objects. The old server removed them,
+            // which made OCR/image understanding impossible.
+            content: Array.isArray(m.content)
+                ? m.content.map(part => {
+                    if (part?.type === 'image_url') {
+                        return {
+                            type: 'image_url',
+                            image_url: { url: part.image_url.url }
+                        };
+                    }
+                    if (part?.type === 'text') {
+                        return { type: 'text', text: String(part.text || '') };
+                    }
+                    return part;
+                })
+                : String(m.content ?? '')
+        }));
+}
+
+function detectFunction(reqBody) {
+    const raw = JSON.stringify(reqBody || '').toLowerCase();
+    return {
+        grammarExplanation:
+            raw.includes('check the grammar') && raw.includes('explanation'),
+        autoGrammar:
+            raw.includes('just return the correct result'),
+        tone:
+            raw.includes('tone'),
+        professional:
+            raw.includes('professional'),
+        synonym:
+            raw.includes('synonym'),
+        image: hasImage(reqBody?.messages || [])
+    };
+}
+
+function buildSystemPrompt(flags) {
+    if (flags.grammarExplanation) {
+        return `Você é um corretor gramatical e ortográfico extremamente cuidadoso.\n\n` +
+            `Analise o texto recebido e responda OBRIGATORIAMENTE como JSON válido, sem markdown, ` +
+            `usando exatamente estas propriedades:\n` +
+            `{"original":"texto original","improved":"texto corrigido","explanation":"explicação breve"}\n\n` +
+            `Preserve o significado e o idioma original. Para português, use português do Brasil.`;
+    }
+
+    if (flags.autoGrammar) {
+        return `Você é o corretor ortográfico e gramatical automático do teclado. ` +
+            `Corrija ortografia, acentuação, pontuação e gramática. ` +
+            `Preserve o significado, o estilo e o idioma original. ` +
+            `Retorne APENAS o texto corrigido, sem explicações, sem aspas e sem markdown.`;
+    }
+
+    if (flags.synonym) {
+        return `Você é um assistente de escrita. Forneça sinônimos adequados ao contexto solicitado. ` +
+            `Mantenha o idioma original e seja direto.`;
+    }
+
+    if (flags.tone) {
+        return `Você altera o tom de textos. Preserve o significado e as informações originais. ` +
+            `Retorne apenas o texto final, sem explicações e sem markdown.`;
+    }
+
+    if (flags.professional) {
+        return `Você é um assistente profissional de escrita. Melhore o texto para comunicação profissional, ` +
+            `preservando o significado. Retorne apenas o texto final, sem explicações e sem markdown.`;
+    }
+
+    if (flags.image) {
+        return `Você é um assistente multimodal. Analise cuidadosamente a imagem recebida. ` +
+            `Quando o usuário pedir para extrair texto, transcreva o texto visível com a maior fidelidade possível. ` +
+            `Quando pedir para explicar, analisar ou responder sobre a imagem, use somente informações realmente ` +
+            `observáveis nela e deixe claro quando algo não puder ser identificado. Responda em português do Brasil ` +
+            `quando o usuário estiver falando português.`;
+    }
+
+    return `Você é o assistente de IA do Horizon Teclado. Seja útil, preciso e direto. ` +
+        `Responda no idioma do usuário. Quando o usuário escrever em português, use português do Brasil.`;
+}
+
+function getGroqError(error) {
+    const status = error?.response?.status;
+    const data = error?.response?.data;
+    if (data?.error?.message) return `Groq ${status || ''}: ${data.error.message}`.trim();
+    if (typeof data === 'string' && data) return `Groq ${status || ''}: ${data}`.trim();
+    return error?.message || 'Erro desconhecido ao consultar a Groq.';
+}
+
+async function callGroq(messages, options = {}) {
+    if (!GROQ_API_KEY) {
+        const err = new Error('GROQ_API_KEY não configurada no Render.');
+        err.statusCode = 500;
+        throw err;
+    }
+
+    const payload = {
+        model: GROQ_MODEL,
+        messages,
+        temperature: options.temperature ?? 0.2
+    };
+
+    if (options.responseFormat) payload.response_format = options.responseFormat;
+    if (options.maxTokens) payload.max_tokens = options.maxTokens;
+
+    const response = await axios.post(GROQ_API_URL, payload, {
+        headers: {
+            Authorization: `Bearer ${GROQ_API_KEY}`,
+            'Content-Type': 'application/json'
+        },
+        timeout: 120000,
+        validateStatus: () => true
+    });
+
+    if (response.status < 200 || response.status >= 300) {
+        const err = new Error(response.data?.error?.message || `Groq HTTP ${response.status}`);
+        err.response = response;
+        throw err;
+    }
+
+    return response.data;
+}
 
 async function handleAIFunctions(req, res) {
     try {
-        const bodyStr = JSON.stringify(req.body).toLowerCase();
-        const messages = req.body.messages || [];
-        const lastMessage = messages.length > 0 ? messages[messages.length - 1].content : '';
-        
-        // 1. Identificar o tipo de função pelo conteúdo do prompt (O APK envia prompts específicos)
-        const isGrammarCheck = bodyStr.includes('check the grammar') && bodyStr.includes('explanation');
-        const isAutoGrammar = bodyStr.includes('just return the correct result');
-        const isToneChanger = bodyStr.includes('tone');
-        const isProfessional = bodyStr.includes('professional');
-        const isVision = messages.some(m => Array.isArray(m.content) && m.content.some(c => c.type === 'image_url'));
+        const messages = normalizeMessages(req.body?.messages || []);
+        const flags = detectFunction(req.body);
+        const systemPrompt = buildSystemPrompt(flags);
 
-        let systemPrompt = "Você é um assistente de IA útil. Responda sempre em Português (Brasil).";
-        let forceJson = false;
-
-        if (isGrammarCheck) {
-            systemPrompt = `Você é um corretor gramatical. Analise o texto e retorne OBRIGATORIAMENTE um JSON com:
-            {
-              "original": "texto original",
-              "improved": "texto corrigido",
-              "explanation": "breve explicação do erro"
-            }`;
-            forceJson = true;
-        } else if (isAutoGrammar) {
-            systemPrompt = "Você é um corretor gramatical. Retorne APENAS o texto corrigido, sem nenhuma explicação ou aspas.";
-        } else if (isToneChanger) {
-            systemPrompt = "Você altera o tom de textos. Retorne APENAS o texto modificado no tom solicitado.";
-        } else if (isProfessional) {
-            systemPrompt = "Você é um assistente de e-mail profissional. Melhore o texto para um ambiente corporativo. Retorne apenas o texto final.";
+        if (!messages.length) {
+            return sendSSEError(res, 'Nenhuma mensagem foi enviada.', 400);
         }
 
-        // Chamada para o Groq (ou OpenAI)
-        const response = await axios.post(GROQ_API_URL, {
-            model: isVision ? "llama-3.2-11b-vision-preview" : "llama-3.3-70b-versatile",
-            messages: [
-                { role: "system", content: systemPrompt },
-                ...messages.map(m => ({
-                    role: m.role,
-                    content: typeof m.content === 'string' ? m.content : (Array.isArray(m.content) ? m.content.filter(c => c.type === 'text').map(c => c.text).join(' ') : JSON.stringify(m.content))
-                }))
-            ],
-            response_format: forceJson ? { type: "json_object" } : undefined,
-            temperature: 0.2
-        }, {
-            headers: { 'Authorization': `Bearer ${GROQ_API_KEY}` }
+        const response = await callGroq([
+            { role: 'system', content: systemPrompt },
+            ...messages
+        ], {
+            temperature: flags.grammarExplanation || flags.autoGrammar ? 0.1 : 0.2,
+            responseFormat: flags.grammarExplanation ? { type: 'json_object' } : undefined
         });
 
-        let aiContent = response.data.choices[0].message.content;
+        const aiContent = response?.choices?.[0]?.message?.content;
+        if (!aiContent) throw new Error('A Groq retornou uma resposta vazia.');
 
-        // O APK espera as respostas via SSE (Stream) no endpoint de completions
         sendSSE(res, aiContent);
-
     } catch (error) {
-        console.error("AI Error:", error.message);
-        sendSSE(res, "Desculpe, tive um problema técnico. Tente novamente.");
+        const message = getGroqError(error);
+        console.error('[AI ERROR]', message);
+        sendSSEError(res, `Erro da IA: ${message}`);
     }
 }
 
 app.post(['/api/completions/v1', '/api/chat/completions', '/api/completions'], handleAIFunctions);
 
-// --- ENDPOINTS DE IMAGEM (GERADOR) ---
-
+// --- IMAGE GENERATION ---
+// Kept compatible with the APK's existing generationId/taskId polling flow.
 app.post('/api/image-generator', async (req, res) => {
     try {
-        const { prompt, style } = req.body;
+        const prompt = String(req.body?.prompt || '').trim();
+        const style = String(req.body?.style || '').trim();
+
+        if (!prompt) return res.status(400).json({ error: 'Prompt vazio.' });
+
         const generationId = crypto.randomUUID();
         const taskId = crypto.randomUUID();
-
-        // Usamos Pollinations AI (Gratuito e rápido)
         const seed = Math.floor(Math.random() * 1000000);
-        const imageUrl = `https://image.pollinations.ai/prompt/${encodeURIComponent(prompt + ", " + (style || "")) }?seed=${seed}&width=1024&height=1024&nologo=true`;
+        const fullPrompt = [prompt, style].filter(Boolean).join(', ');
+        const imageUrl = `https://image.pollinations.ai/prompt/${encodeURIComponent(fullPrompt)}?seed=${seed}&width=1024&height=1024&nologo=true`;
 
-        // Salva para o Polling
-        imageTasks.set(generationId, {
+        const task = {
             generationId,
             taskId,
             status: 'completed',
             percentage: '100',
             imageUrls: [{ url: imageUrl }]
-        });
+        };
 
-        // O APK espera o formato: { data: { generationId, taskId, ... } }
-        res.json({
-            data: {
-                generationId,
-                taskId,
-                status: 'completed',
-                percentage: '100',
-                imageUrls: [{ url: imageUrl }]
-            }
-        });
+        imageTasks.set(generationId, task);
+        res.json({ data: task });
     } catch (error) {
+        console.error('[IMAGE ERROR]', error.message);
         res.status(500).json({ error: error.message });
     }
 });
 
 app.get('/api/image-generator/:id', (req, res) => {
     const task = imageTasks.get(req.params.id);
-    if (!task) return res.status(404).json({ error: "Task not found" });
+    if (!task) return res.status(404).json({ error: 'Task not found' });
     res.json({ data: task });
 });
 
-// --- ENDPOINT DE UPLOAD (OCR / VISÃO) ---
-app.post('/api/upload', (req, res) => {
-    // O APK chama esse endpoint antes de enviar imagens para a IA
-    res.json({
-        status: "success",
-        data: {
-            url: "https://via.placeholder.com/150", // Placeholder, o app usa o base64 local
-            message: "Upload successful"
+// --- UPLOAD / IMAGE TO BASE64 ---
+// Supports both multipart/form-data and JSON/base64.
+app.post('/api/upload', upload.single('file'), (req, res) => {
+    try {
+        if (req.file) {
+            const mime = req.file.mimetype || 'image/jpeg';
+            const base64 = req.file.buffer.toString('base64');
+            const dataUrl = `data:${mime};base64,${base64}`;
+            return res.json({
+                status: 'success',
+                data: { url: dataUrl, message: 'Upload successful' }
+            });
+        }
+
+        const possible = req.body?.file || req.body?.image || req.body?.base64 || req.body?.data;
+        if (typeof possible === 'string' && possible.length > 20) {
+            const dataUrl = possible.startsWith('data:')
+                ? possible
+                : `data:image/jpeg;base64,${possible}`;
+            return res.json({
+                status: 'success',
+                data: { url: dataUrl, message: 'Upload successful' }
+            });
+        }
+
+        // Keep compatibility with APK callers that only use this endpoint as a handshake.
+        res.json({
+            status: 'success',
+            data: { url: '', message: 'Upload successful' }
+        });
+    } catch (error) {
+        console.error('[UPLOAD ERROR]', error.message);
+        res.status(500).json({ status: 'error', error: error.message });
+    }
+});
+
+// Groq does not expose an embeddings endpoint compatible with the old APK path.
+// Return a clean response instead of pretending an embedding was generated.
+app.post('/api/embeddings', (req, res) => {
+    res.status(501).json({
+        error: {
+            message: 'Embeddings are not implemented by this Groq-backed server.'
         }
     });
 });
 
-app.get('/health', (req, res) => res.json({ status: "ok" }));
+app.get('/health', (req, res) => {
+    res.json({
+        status: 'ok',
+        groqConfigured: Boolean(GROQ_API_KEY),
+        model: GROQ_MODEL,
+        vision: true,
+        endpoints: [
+            '/api/completions/v1',
+            '/api/chat/completions',
+            '/api/completions',
+            '/api/image-generator',
+            '/api/upload',
+            '/api/embeddings'
+        ]
+    });
+});
 
-app.listen(PORT, () => console.log(`Servidor rodando na porta ${PORT}`));
+app.listen(PORT, () => {
+    console.log(`Servidor rodando na porta ${PORT}`);
+    console.log(`Modelo Groq: ${GROQ_MODEL}`);
+    console.log(`GROQ_API_KEY configurada: ${Boolean(GROQ_API_KEY)}`);
+});
