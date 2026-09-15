@@ -1,13 +1,13 @@
 {
   "name": "starnest-ai-server",
-  "version": "2.0.0",
-  "description": "Servidor proxy SSE para Horizon Teclado IA com texto, correção, visão e geração de imagens",
+  "version": "1.0.0",
+  "description": "Servidor proxy SSE para Starnest/Horizon Teclado com suporte a arquivos",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
     "dev": "nodemon server.js"
   },
-  "keywords": ["horizon", "teclado", "ai", "groq", "qwen", "sse", "vision", "ocr"],
+  "keywords": ["starnest", "ai", "sse", "proxy", "files"],
   "author": "",
   "license": "MIT",
   "dependencies": {
