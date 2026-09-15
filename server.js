@@ -91,7 +91,7 @@ async function handleAIFunctions(req, res) {
             messages: [{ role: 'system', content: systemPrompt }, ...normalizeMessages(messages)],
             ...(responseFormat ? { response_format: responseFormat } : {}),
             temperature: flags.vision ? 0.2 : 0.1,
-            max_completion_tokens: 2048
+            max_completion_tokens: flags.vision ? 800 : 2048
         }, {
             headers: {
                 Authorization: `Bearer ${GROQ_API_KEY}`,
@@ -124,7 +124,8 @@ app.post('/api/image-generator', async (req, res) => {
         const imageUrl = `https://image.pollinations.ai/prompt/${encodeURIComponent(`${prompt || ''}, ${style || ''}`)}?seed=${seed}&width=1024&height=1024&nologo=true`;
         const task = { generationId, taskId, status: 'completed', percentage: '100', imageUrls: [{ url: imageUrl }] };
         imageTasks.set(generationId, task);
-        res.json({ data: task });
+        // O APK declara ImageGeneratorResponse.data como String e espera a URL diretamente.
+        res.json({ data: imageUrl });
     } catch (error) {
         res.status(500).json({ error: error.message });
     }
