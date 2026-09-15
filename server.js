@@ -128,15 +128,22 @@ app.post(['/api/completions/v1', '/api/chat/completions', '/api/completions'], h
 
 app.post('/api/image-generator', async (req, res) => {
     try {
-        const { prompt, style } = req.body;
+        const { prompt, style, size, seed } = req.body;
         const generationId = crypto.randomUUID();
         const taskId = crypto.randomUUID();
-        const seed = Math.floor(Math.random() * 1000000);
-        const imageUrl = `https://image.pollinations.ai/prompt/${encodeURIComponent(`${prompt || ''}, ${style || ''}`)}?seed=${seed}&width=1024&height=1024&nologo=true`;
+        const imageSeed = Number.isInteger(seed) ? seed : Math.floor(Math.random() * 1000000);
+        const width = Number(size?.width) || 1024;
+        const height = Number(size?.height) || 1024;
+        const imageUrl = `https://image.pollinations.ai/prompt/${encodeURIComponent(`${prompt || ''}${style ? `, ${style}` : ''}`)}?seed=${imageSeed}&width=${width}&height=${height}&nologo=true`;
+        const imageResponse = await axios.get(imageUrl, {
+            responseType: 'arraybuffer',
+            timeout: 120000
+        });
+        const base64Image = Buffer.from(imageResponse.data).toString('base64');
         const task = { generationId, taskId, status: 'completed', percentage: '100', imageUrls: [{ url: imageUrl }] };
         imageTasks.set(generationId, task);
-        // O APK declara ImageGeneratorResponse.data como String e espera a URL diretamente.
-        res.json({ data: imageUrl });
+        // O APK executa Base64.decode(data), portanto data deve ser Base64 puro, sem prefixo data:.
+        res.json({ data: base64Image });
     } catch (error) {
         res.status(500).json({ error: error.message });
     }
