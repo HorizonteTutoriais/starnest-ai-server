@@ -80,6 +80,11 @@ function detectRequest(messages) {
     };
 }
 
+function hasAutoGrammarSchema(req) {
+    const format = JSON.stringify(req.body?.response_format || {}).toLowerCase();
+    return format.includes('iscorrect') || format.includes('auto_grammar');
+}
+
 async function handleAIFunctions(req, res) {
     try {
         const wantsStream = req.body?.stream === true;
@@ -90,14 +95,16 @@ async function handleAIFunctions(req, res) {
 
         const messages = Array.isArray(req.body.messages) ? req.body.messages : [];
         const flags = detectRequest(messages);
+        const autoGrammarSchema = hasAutoGrammarSchema(req);
         let systemPrompt = 'Você é um assistente de IA útil. Responda sempre em Português (Brasil).';
         let responseFormat;
 
         if (flags.grammarCheck) {
             systemPrompt = 'Você é um corretor gramatical. Retorne obrigatoriamente um JSON com as chaves original, improved e explanation. A explicação deve ser em Português (Brasil).';
             responseFormat = { type: 'json_object' };
-        } else if (flags.autoGrammar) {
-            systemPrompt = 'Você é um corretor gramatical. Retorne apenas o texto corrigido, sem explicação, sem aspas e sem comentários adicionais.';
+        } else if (flags.autoGrammar || autoGrammarSchema) {
+            systemPrompt = 'Você é um corretor gramatical. Retorne obrigatoriamente um JSON com as chaves improved e isCorrect. improved deve conter somente o texto corrigido. isCorrect deve ser true somente quando o texto original já estiver correto. Não inclua explicações nem outras chaves.';
+            responseFormat = { type: 'json_object' };
         } else if (flags.toneChanger) {
             systemPrompt = 'Você altera o tom de textos. Retorne apenas o texto modificado no tom solicitado.';
         } else if (flags.professional) {
