@@ -64,8 +64,15 @@ function detectRequest(messages) {
     const bodyText = JSON.stringify(messages).toLowerCase();
     return {
         grammarCheck: (bodyText.includes('check the grammar') || bodyText.includes('gramática') || bodyText.includes('grammatical')) && bodyText.includes('explanation'),
-        autoGrammar: bodyText.includes('just return the correct result')
-            || ((bodyText.includes('verifique a gramática') || bodyText.includes('confira a gramática')) && !bodyText.includes('explanation')),
+        autoGrammar: !bodyText.includes('explanation') && (
+            bodyText.includes('just return the correct result')
+            || bodyText.includes('check grammar')
+            || bodyText.includes('check the grammar')
+            || bodyText.includes('grammar & spelling')
+            || bodyText.includes('gramática e ortografia')
+            || bodyText.includes('verifique a gramática')
+            || bodyText.includes('confira a gramática')
+        ),
         toneChanger: bodyText.includes('tone'),
         professional: bodyText.includes('professional'),
         vision: messages.some((message) => Array.isArray(message.content)
