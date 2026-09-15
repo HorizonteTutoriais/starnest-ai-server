@@ -23,6 +23,16 @@ function sendSSE(res, content) {
     res.end();
 }
 
+function sendCompletionJSON(res, content) {
+    res.json({
+        data: {
+            choices: [{
+                message: { role: 'assistant', content }
+            }]
+        }
+    });
+}
+
 function normalizeMessages(messages) {
     return messages.map((message) => {
         if (Array.isArray(message.content)) {
@@ -54,7 +64,11 @@ function detectRequest(messages) {
 
 async function handleAIFunctions(req, res) {
     try {
-        if (!GROQ_API_KEY) return sendSSE(res, 'Erro da IA: GROQ_API_KEY não configurada no servidor.');
+        const wantsStream = req.body?.stream === true;
+        if (!GROQ_API_KEY) {
+            const errorMessage = 'Erro da IA: GROQ_API_KEY não configurada no servidor.';
+            return wantsStream ? sendSSE(res, errorMessage) : res.status(503).json({ error: errorMessage });
+        }
 
         const messages = Array.isArray(req.body.messages) ? req.body.messages : [];
         const flags = detectRequest(messages);
@@ -88,11 +102,14 @@ async function handleAIFunctions(req, res) {
 
         const content = response.data?.choices?.[0]?.message?.content;
         if (!content) throw new Error('Resposta vazia do provedor de IA.');
-        sendSSE(res, content);
+        if (wantsStream) return sendSSE(res, content);
+        return sendCompletionJSON(res, content);
     } catch (error) {
         const providerMessage = error.response?.data?.error?.message || error.message;
         console.error('AI Error:', providerMessage);
-        sendSSE(res, `Erro da IA: ${providerMessage}`);
+        const errorMessage = `Erro da IA: ${providerMessage}`;
+        if (req.body?.stream === true) return sendSSE(res, errorMessage);
+        return res.status(502).json({ error: errorMessage });
     }
 }
 
