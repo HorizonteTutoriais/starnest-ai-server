@@ -40,7 +40,18 @@ function normalizeMessages(messages) {
                 role: message.role,
                 content: message.content.map((part) => {
                     if (part.type === 'text') return part;
-                    if (part.type === 'image_url' && part.image_url?.url) return part;
+                    if (part.type === 'image_url' && part.image_url?.url) {
+                        const rawUrl = String(part.image_url.url).trim();
+                        if (/^https?:\/\//i.test(rawUrl)) return { type: 'image_url', image_url: { url: rawUrl } };
+                        if (/^data:image\//i.test(rawUrl)) {
+                            const match = rawUrl.match(/^data:(image\/[a-z0-9.+-]+);base64,(.*)$/is);
+                            if (!match) return null;
+                            const cleanBase64 = match[2].replace(/\s+/g, '');
+                            return { type: 'image_url', image_url: { url: `data:${match[1]};base64,${cleanBase64}` } };
+                        }
+                        const cleanBase64 = rawUrl.replace(/^base64,?/i, '').replace(/\s+/g, '');
+                        return { type: 'image_url', image_url: { url: `data:image/jpeg;base64,${cleanBase64}` } };
+                    }
                     return null;
                 }).filter(Boolean)
             };
@@ -91,7 +102,7 @@ async function handleAIFunctions(req, res) {
             messages: [{ role: 'system', content: systemPrompt }, ...normalizeMessages(messages)],
             ...(responseFormat ? { response_format: responseFormat } : {}),
             temperature: flags.vision ? 0.2 : 0.1,
-            max_completion_tokens: flags.vision ? 800 : 2048
+            max_completion_tokens: flags.vision ? 400 : 2048
         }, {
             headers: {
                 Authorization: `Bearer ${GROQ_API_KEY}`,
